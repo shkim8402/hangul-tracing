@@ -26,8 +26,14 @@ class WritingBox(context: Context, private val syllable: String) : View(context)
 
     private val d = context.resources.displayMetrics.density
 
+    // 화면에 보이는 가는 획
     private var strokeBmp: Bitmap? = null
     private var strokeCanvas: Canvas? = null
+
+    // 판정 전용(화면에 안 보임): 같은 획을 예전 굵기로 그려 둔 층. 보이는 굵기와 판정을 분리합니다.
+    private var judgeBmp: Bitmap? = null
+    private var judgeCanvas: Canvas? = null
+
     private var glyphIdx = IntArray(0)          // 글자 모양 위의 샘플 점 (픽셀 인덱스)
     private var glyphGrid = BooleanArray(0)     // 3px 간격 격자에서 글자 위인 칸
     private var gridW = 0
@@ -62,6 +68,16 @@ class WritingBox(context: Context, private val syllable: String) : View(context)
         color = 0xFFFF7043.toInt()
         style = Paint.Style.FILL
     }
+    private val judgePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.BLACK
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+    }
+    private val judgeDotPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.BLACK
+        style = Paint.Style.FILL
+    }
     private val okFill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = 0xFF4CAF50.toInt() }
     private val okLine = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
@@ -85,10 +101,21 @@ class WritingBox(context: Context, private val syllable: String) : View(context)
         strokeBmp = bmp
         strokeCanvas = c
 
+        val oldJ = judgeBmp
+        val bmpJ = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val cJ = Canvas(bmpJ)
+        if (oldJ != null) {
+            cJ.drawBitmap(oldJ, null, Rect(0, 0, w, h), bitmapPaint)
+            oldJ.recycle()
+        }
+        judgeBmp = bmpJ
+        judgeCanvas = cJ
+
         glyphPaint.textSize = w * 0.82f
         val fm = glyphPaint.fontMetrics
         baseline = h / 2f - (fm.ascent + fm.descent) / 2f
-        inkPaint.strokeWidth = w * 0.12f
+        inkPaint.strokeWidth = w * INK_FRACTION
+        judgePaint.strokeWidth = w * JUDGE_FRACTION
         buildMasks(w, h)
     }
 
@@ -134,6 +161,7 @@ class WritingBox(context: Context, private val syllable: String) : View(context)
 
     fun clear() {
         strokeBmp?.eraseColor(0)
+        judgeBmp?.eraseColor(0)
         done = false
         invalidate()
     }
@@ -146,6 +174,7 @@ class WritingBox(context: Context, private val syllable: String) : View(context)
                 lastX = e.x
                 lastY = e.y
                 c.drawCircle(e.x, e.y, inkPaint.strokeWidth / 2f, dotPaint)
+                judgeCanvas?.drawCircle(e.x, e.y, judgePaint.strokeWidth / 2f, judgeDotPaint)
                 invalidate()
             }
             MotionEvent.ACTION_MOVE -> {
@@ -166,12 +195,13 @@ class WritingBox(context: Context, private val syllable: String) : View(context)
 
     private fun segment(c: Canvas, x: Float, y: Float) {
         c.drawLine(lastX, lastY, x, y, inkPaint)
+        judgeCanvas?.drawLine(lastX, lastY, x, y, judgePaint)
         lastX = x
         lastY = y
     }
 
     private fun evaluate() {
-        val bmp = strokeBmp ?: return
+        val bmp = judgeBmp ?: return // 판정은 보이는 획이 아니라 판정용 층으로 합니다
         val w = bmp.width
         val h = bmp.height
         if (glyphIdx.isEmpty() || tolerance.size != w * h) return
@@ -277,6 +307,12 @@ class WritingBox(context: Context, private val syllable: String) : View(context)
     }
 
     companion object {
+        /** 화면에 보이는 획 굵기 (칸 너비 대비) */
+        const val INK_FRACTION = 0.05f
+
+        /** 판정에 쓰는 획 굵기 (칸 너비 대비). 시뮬레이션으로 맞춘 값이라 보이는 굵기와 상관없이 고정 */
+        const val JUDGE_FRACTION = 0.12f
+
         /** 글자 모양의 몇 %를 덮어야 완료인지 */
         const val COVERAGE_NEEDED = 0.85f
 
