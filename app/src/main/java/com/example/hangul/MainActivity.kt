@@ -1,6 +1,7 @@
 package com.example.hangul
 
 import android.app.Activity
+import android.content.res.Configuration
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
@@ -26,14 +27,19 @@ class MainActivity : Activity() {
 
     private val bgColor = 0xFFFFF8E1.toInt()
 
+    private lateinit var content: LinearLayout
+    private lateinit var topBar: LinearLayout
     private lateinit var emojiView: TextView
     private lateinit var wordView: TextView
     private lateinit var starView: TextView
-    private lateinit var boxRow: LinearLayout
+    private lateinit var muteView: TextView
+    private lateinit var boxGrid: BoxGrid
+    private lateinit var buttonArea: FrameLayout
     private lateinit var normalRow: LinearLayout
     private lateinit var nextBtn: Button
     private lateinit var confetti: ConfettiView
     private lateinit var sound: SoundFx
+    private lateinit var bgm: Bgm
 
     private var tts: TextToSpeech? = null
     private var ttsReady = false
@@ -45,15 +51,32 @@ class MainActivity : Activity() {
     private var currentWord: Word? = null
     private var completed = false
     private var stars = 0
+    private var muted = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         window.statusBarColor = bgColor
+        muted = getSharedPreferences("hangul", MODE_PRIVATE).getBoolean("muted", false)
         sound = SoundFx()
+        bgm = Bgm()
         setContentView(buildUi())
         initTts()
         showWord(nextWord())
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (!muted) bgm.start()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        bgm.pause()
+        try {
+            tts?.stop()
+        } catch (e: Throwable) {
+        }
     }
 
     override fun onDestroy() {
@@ -65,6 +88,13 @@ class MainActivity : Activity() {
         } catch (e: Throwable) {
         }
         sound.release()
+        bgm.release()
+    }
+
+    /** 폰을 가로/세로로 돌리면 배치를 바꿉니다 (액티비티는 그대로라 쓴 글씨가 유지돼요). */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        applyLayout()
     }
 
     // ---------------------------------------------------------------- UI
@@ -88,38 +118,38 @@ class MainActivity : Activity() {
     }
 
     private fun buildUi(): View {
-        val metrics = resources.displayMetrics
         val root = FrameLayout(this)
         root.setBackgroundColor(bgColor)
 
-        val col = LinearLayout(this)
-        col.orientation = LinearLayout.VERTICAL
-        col.gravity = Gravity.CENTER_HORIZONTAL
-        col.setPadding(dp(16), dp(16), dp(16), dp(20))
+        content = LinearLayout(this)
+        content.setPadding(dp(16), dp(12), dp(16), dp(16))
 
-        // 맨 위: 안내 문구 + 별 개수
-        val top = LinearLayout(this)
-        top.orientation = LinearLayout.HORIZONTAL
-        top.gravity = Gravity.CENTER_VERTICAL
+        // 맨 위: 안내 문구 + 별 개수 + 소리 켜기/끄기
+        topBar = LinearLayout(this)
+        topBar.orientation = LinearLayout.HORIZONTAL
+        topBar.gravity = Gravity.CENTER_VERTICAL
         val hint = TextView(this)
         hint.text = "천천히 써 보세요"
         hint.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
         hint.setTextColor(0xFF888888.toInt())
-        top.addView(hint, LinearLayout.LayoutParams(0, WRAP, 1f))
+        topBar.addView(hint, LinearLayout.LayoutParams(0, WRAP, 1f))
         starView = TextView(this)
         starView.text = "⭐ 0"
         starView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
         starView.setTextColor(0xFFFF8F00.toInt())
-        top.addView(starView, LinearLayout.LayoutParams(WRAP, WRAP))
-        col.addView(top, LinearLayout.LayoutParams(MATCH, WRAP))
+        topBar.addView(starView, LinearLayout.LayoutParams(WRAP, WRAP))
+        muteView = TextView(this)
+        muteView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 24f)
+        muteView.setPadding(dp(14), dp(4), dp(6), dp(4))
+        muteView.setOnClickListener { toggleMute() }
+        updateMuteIcon()
+        topBar.addView(muteView, LinearLayout.LayoutParams(WRAP, WRAP))
 
         // 그림 (누르면 단어를 읽어줘요)
         emojiView = TextView(this)
         emojiView.gravity = Gravity.CENTER
         emojiView.setIncludeFontPadding(false)
-        emojiView.setTextSize(TypedValue.COMPLEX_UNIT_PX, metrics.heightPixels * 0.14f)
         emojiView.setOnClickListener { speakWord() }
-        col.addView(emojiView, LinearLayout.LayoutParams(MATCH, 0, 1f))
 
         // 단어
         wordView = TextView(this)
@@ -127,19 +157,12 @@ class MainActivity : Activity() {
         wordView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 52f)
         wordView.setTextColor(0xFF222222.toInt())
         wordView.setOnClickListener { speakWord() }
-        val wlp = LinearLayout.LayoutParams(MATCH, WRAP)
-        wlp.topMargin = dp(4)
-        wlp.bottomMargin = dp(16)
-        col.addView(wordView, wlp)
 
-        // 따라쓰기 칸
-        boxRow = LinearLayout(this)
-        boxRow.orientation = LinearLayout.HORIZONTAL
-        boxRow.gravity = Gravity.CENTER
-        col.addView(boxRow, LinearLayout.LayoutParams(MATCH, WRAP))
+        // 따라쓰기 칸 (공간에 맞춰 가장 크게 배치)
+        boxGrid = BoxGrid(this)
 
         // 버튼 영역
-        val buttonArea = FrameLayout(this)
+        buttonArea = FrameLayout(this)
         normalRow = LinearLayout(this)
         normalRow.orientation = LinearLayout.HORIZONTAL
 
@@ -162,17 +185,76 @@ class MainActivity : Activity() {
         nextBtn.setOnClickListener { showWord(nextWord()) }
         buttonArea.addView(nextBtn, FrameLayout.LayoutParams(MATCH, dp(68)))
 
-        val blp = LinearLayout.LayoutParams(MATCH, WRAP)
-        blp.topMargin = dp(20)
-        col.addView(buttonArea, blp)
-
-        root.addView(col, FrameLayout.LayoutParams(MATCH, MATCH))
+        root.addView(content, FrameLayout.LayoutParams(MATCH, MATCH))
 
         // 폭죽 오버레이 (맨 위, 터치 통과)
         confetti = ConfettiView(this)
         root.addView(confetti, FrameLayout.LayoutParams(MATCH, MATCH))
 
+        applyLayout()
         return root
+    }
+
+    /** 세로: 위→아래로 쌓기 / 가로: 왼쪽(그림+단어), 오른쪽(칸+버튼) */
+    private fun applyLayout() {
+        val landscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+
+        for (v in listOf(topBar, emojiView, wordView, boxGrid, buttonArea)) {
+            (v.parent as? ViewGroup)?.removeView(v)
+        }
+        content.removeAllViews()
+
+        val dm = resources.displayMetrics
+        emojiView.setTextSize(TypedValue.COMPLEX_UNIT_PX, minOf(dm.widthPixels, dm.heightPixels) * 0.26f)
+
+        if (!landscape) {
+            content.orientation = LinearLayout.VERTICAL
+            content.addView(topBar, LinearLayout.LayoutParams(MATCH, WRAP))
+            content.addView(emojiView, LinearLayout.LayoutParams(MATCH, 0, 1f))
+            val wlp = LinearLayout.LayoutParams(MATCH, WRAP)
+            wlp.topMargin = dp(4)
+            wlp.bottomMargin = dp(12)
+            content.addView(wordView, wlp)
+            content.addView(boxGrid, LinearLayout.LayoutParams(MATCH, 0, 1.7f))
+            val blp = LinearLayout.LayoutParams(MATCH, WRAP)
+            blp.topMargin = dp(12)
+            content.addView(buttonArea, blp)
+        } else {
+            content.orientation = LinearLayout.HORIZONTAL
+            val left = LinearLayout(this)
+            left.orientation = LinearLayout.VERTICAL
+            left.gravity = Gravity.CENTER_HORIZONTAL
+            left.addView(emojiView, LinearLayout.LayoutParams(MATCH, 0, 1f))
+            left.addView(wordView, LinearLayout.LayoutParams(MATCH, WRAP))
+
+            val right = LinearLayout(this)
+            right.orientation = LinearLayout.VERTICAL
+            right.addView(topBar, LinearLayout.LayoutParams(MATCH, WRAP))
+            right.addView(boxGrid, LinearLayout.LayoutParams(MATCH, 0, 1f))
+            val blp = LinearLayout.LayoutParams(MATCH, WRAP)
+            blp.topMargin = dp(8)
+            right.addView(buttonArea, blp)
+
+            val llp = LinearLayout.LayoutParams(0, MATCH, 1f)
+            llp.marginEnd = dp(8)
+            content.addView(left, llp)
+            val rlp = LinearLayout.LayoutParams(0, MATCH, 1.6f)
+            rlp.marginStart = dp(8)
+            content.addView(right, rlp)
+        }
+    }
+
+    // ---------------------------------------------------------------- 소리 켜기/끄기
+
+    private fun updateMuteIcon() {
+        muteView.text = if (muted) "🔇" else "🔊"
+    }
+
+    private fun toggleMute() {
+        muted = !muted
+        getSharedPreferences("hangul", MODE_PRIVATE).edit().putBoolean("muted", muted).apply()
+        updateMuteIcon()
+        if (muted) bgm.pause() else bgm.start()
     }
 
     // ---------------------------------------------------------------- 단어 진행
@@ -199,22 +281,21 @@ class MainActivity : Activity() {
         emojiView.text = w.emoji
         wordView.text = syllables.toList().joinToString("  ")
 
-        boxRow.removeAllViews()
+        boxGrid.removeAllViews()
         boxes.clear()
-        val n = syllables.length.coerceAtLeast(1)
-        val avail = resources.displayMetrics.widthPixels - dp(32)
-        val size = minOf(avail / n, dp(170))
         for (ch in syllables) {
             val box = WritingBox(this, ch.toString())
             box.onDone = { onBoxDone() }
-            boxRow.addView(box, LinearLayout.LayoutParams(size, size))
+            boxGrid.addView(box)
             boxes.add(box)
         }
+        boxGrid.requestLayout()
 
         nextBtn.visibility = View.GONE
         normalRow.visibility = View.VISIBLE
 
         handler.removeCallbacksAndMessages(null)
+        bgm.setVolume(Bgm.DEFAULT_VOLUME)
         handler.postDelayed({ speakWord() }, 350)
     }
 
@@ -231,6 +312,11 @@ class MainActivity : Activity() {
     private fun onWordComplete() {
         stars++
         starView.text = "⭐ $stars"
+
+        // 팡파레가 잘 들리도록 BGM은 잠깐 작게
+        bgm.setVolume(Bgm.DUCK_VOLUME)
+        handler.postDelayed({ bgm.setVolume(Bgm.DEFAULT_VOLUME) }, 3300)
+
         sound.playFanfare()
         confetti.start()
 

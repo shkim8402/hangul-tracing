@@ -5,12 +5,17 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Rect
 import android.view.MotionEvent
 import android.view.View
 
 /**
  * 글자 한 칸. 연한 회색 글자를 손가락으로 따라 쓰면 됩니다.
- * 글자 모양 위를 충분히 덮고, 글자 밖으로 너무 벗어나지 않으면 "완료"로 판정합니다.
+ *
+ * 완료 조건 (모두 만족해야 함, 마지막 획까지 다 써야 통과):
+ *  1) 글자 모양의 85% 이상을 덮었고
+ *  2) 글자 밖으로 크게 벗어나지 않았고 (칸 전체 낙서 방지)
+ *  3) 글자 위에 "획 굵기만큼의 안 덮인 덩어리"가 남아 있지 않을 것 (빼먹은 획 검출)
  */
 class WritingBox(context: Context, private val syllable: String) : View(context) {
 
@@ -23,12 +28,16 @@ class WritingBox(context: Context, private val syllable: String) : View(context)
 
     private var strokeBmp: Bitmap? = null
     private var strokeCanvas: Canvas? = null
-    private var glyphIdx = IntArray(0)          // 글자 모양 위의 샘플 점
+    private var glyphIdx = IntArray(0)          // 글자 모양 위의 샘플 점 (픽셀 인덱스)
+    private var glyphGrid = BooleanArray(0)     // 3px 간격 격자에서 글자 위인 칸
+    private var gridW = 0
+    private var gridH = 0
     private var tolerance = BooleanArray(0)     // 글자 주변 허용 범위
     private var baseline = 0f
     private var lastX = 0f
     private var lastY = 0f
 
+    private val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.WHITE }
     private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
@@ -65,10 +74,16 @@ class WritingBox(context: Context, private val syllable: String) : View(context)
         super.onSizeChanged(w, h, oldw, oldh)
         if (w <= 0 || h <= 0) return
 
-        strokeBmp?.recycle()
+        // 화면 회전 등으로 크기가 바뀌어도 이미 쓴 획은 크기에 맞춰 유지
+        val old = strokeBmp
         val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp)
+        if (old != null) {
+            c.drawBitmap(old, null, Rect(0, 0, w, h), bitmapPaint)
+            old.recycle()
+        }
         strokeBmp = bmp
-        strokeCanvas = Canvas(bmp)
+        strokeCanvas = c
 
         glyphPaint.textSize = w * 0.82f
         val fm = glyphPaint.fontMetrics
@@ -88,19 +103,21 @@ class WritingBox(context: Context, private val syllable: String) : View(context)
         }
         val px = IntArray(w * h)
 
-        // 1) 글자 모양 그대로
+        // 1) 글자 모양 그대로 (3px 간격으로 샘플링)
         c.drawText(syllable, w / 2f, baseline, p)
         tmp.getPixels(px, 0, w, 0, 0, w, h)
+        gridW = (w + 2) / 3
+        gridH = (h + 2) / 3
+        glyphGrid = BooleanArray(gridW * gridH)
         val list = ArrayList<Int>()
-        var y = 0
-        while (y < h) {
-            var x = 0
-            while (x < w) {
-                val i = y * w + x
-                if ((px[i] ushr 24) > 128) list.add(i)
-                x += 3
+        for (gy in 0 until gridH) {
+            for (gx in 0 until gridW) {
+                val i = (gy * 3) * w + gx * 3
+                if ((px[i] ushr 24) > 128) {
+                    list.add(i)
+                    glyphGrid[gy * gridW + gx] = true
+                }
             }
-            y += 3
         }
         glyphIdx = list.toIntArray()
 
@@ -162,31 +179,65 @@ class WritingBox(context: Context, private val syllable: String) : View(context)
         val px = IntArray(w * h)
         bmp.getPixels(px, 0, w, 0, 0, w, h)
 
+        // 1) 글자 모양을 얼마나 덮었나
         var covered = 0
         for (i in glyphIdx) if ((px[i] ushr 24) > 40) covered++
+        val coverage = covered.toFloat() / glyphIdx.size
+        if (coverage < COVERAGE_NEEDED) return
 
+        // 2) 글자 밖으로 벗어난 정도
         var total = 0
         var outside = 0
-        var y = 0
-        while (y < h) {
-            var x = 0
-            while (x < w) {
-                val i = y * w + x
+        for (gy in 0 until gridH) {
+            for (gx in 0 until gridW) {
+                val i = (gy * 3) * w + gx * 3
                 if ((px[i] ushr 24) > 40) {
                     total++
                     if (!tolerance[i]) outside++
                 }
-                x += 3
             }
-            y += 3
         }
-
-        val coverage = covered.toFloat() / glyphIdx.size
         val messy = if (total == 0) 1f else outside.toFloat() / total
-        if (coverage >= COVERAGE_NEEDED && messy <= MAX_OUTSIDE) {
-            done = true
-            onDone?.invoke()
+        if (messy > MAX_OUTSIDE) return
+
+        // 3) 안 덮인 획 조각이 남아 있으면 아직 미완성
+        if (hasUncoveredBlock(px, w)) return
+
+        done = true
+        onDone?.invoke()
+    }
+
+    /** 글자 위에서 정사각형 블록 하나가 통째로 안 덮여 있는 곳이 있는지 (적분 이미지로 검사) */
+    private fun hasUncoveredBlock(px: IntArray, w: Int): Boolean {
+        val gw = gridW
+        val gh = gridH
+        val k = maxOf(5, Math.round(w * BLOCK_FRACTION / 3f)) / 2
+        val win = 2 * k + 1
+        if (gw < win || gh < win) return false
+
+        val stride = gw + 1
+        val ps = IntArray(stride * (gh + 1))
+        for (gy in 0 until gh) {
+            var rowSum = 0
+            for (gx in 0 until gw) {
+                val bad = if (glyphGrid[gy * gw + gx] &&
+                    (px[(gy * 3) * w + gx * 3] ushr 24) <= 40
+                ) 1 else 0
+                rowSum += bad
+                ps[(gy + 1) * stride + gx + 1] = ps[gy * stride + gx + 1] + rowSum
+            }
         }
+        val area = win * win
+        for (gy in 0..(gh - win)) {
+            for (gx in 0..(gw - win)) {
+                val s = ps[(gy + win) * stride + gx + win] -
+                    ps[gy * stride + gx + win] -
+                    ps[(gy + win) * stride + gx] +
+                    ps[gy * stride + gx]
+                if (s == area) return true
+            }
+        }
+        return false
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -226,10 +277,13 @@ class WritingBox(context: Context, private val syllable: String) : View(context)
     }
 
     companion object {
-        /** 글자 모양의 몇 %를 덮어야 완료인지 (유아용이라 넉넉하게) */
-        const val COVERAGE_NEEDED = 0.70f
+        /** 글자 모양의 몇 %를 덮어야 완료인지 */
+        const val COVERAGE_NEEDED = 0.85f
 
         /** 글자 밖으로 벗어난 획의 허용 비율 (칸 전체 낙서를 걸러내는 기준) */
         const val MAX_OUTSIDE = 0.18f
+
+        /** 안 덮인 블록 검사 크기 (칸 너비 대비). 획 굵기(약 0.06)보다 조금 작은 값 */
+        const val BLOCK_FRACTION = 0.053f
     }
 }

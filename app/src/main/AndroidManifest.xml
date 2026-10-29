@@ -13,11 +13,12 @@
         android:label="한글 따라쓰기"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
+        <!-- screenOrientation을 지정하지 않으면 폰의 자동 회전 설정을 따라 가로/세로로 회전합니다.
+             configChanges: 회전해도 액티비티를 다시 만들지 않아 쓰던 글씨가 유지됩니다. -->
         <activity
             android:name=".MainActivity"
-            android:configChanges="orientation|screenSize|keyboardHidden"
-            android:exported="true"
-            android:screenOrientation="portrait">
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

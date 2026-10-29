@@ -146,3 +146,125 @@ class SoundFx {
         }
     }
 }
+
+/** 배경음악: 코드로 만든 잔잔한 오르골풍 멜로디(약 18초)를 계속 반복 재생합니다. */
+class Bgm {
+
+    private val sampleRate = 22050
+    private var track: AudioTrack? = null
+    private var volume = DEFAULT_VOLUME
+
+    fun start() {
+        try {
+            if (track == null) track = build()
+            track?.setVolume(volume)
+            track?.play()
+        } catch (e: Throwable) {
+        }
+    }
+
+    fun pause() {
+        try {
+            track?.pause()
+        } catch (e: Throwable) {
+        }
+    }
+
+    fun setVolume(v: Float) {
+        volume = v
+        try {
+            track?.setVolume(v)
+        } catch (e: Throwable) {
+        }
+    }
+
+    fun release() {
+        try {
+            track?.release()
+        } catch (e: Throwable) {
+        }
+        track = null
+    }
+
+    private fun build(): AudioTrack {
+        val stepSec = 60f / 108f / 2f // 8분음표 한 칸 (108bpm)
+        val steps = MELODY.size * 8
+        val buf = FloatArray((steps * stepSec * sampleRate).toInt())
+
+        for (bar in MELODY.indices) {
+            for (s in 0 until 8) {
+                val note = MELODY[bar][s]
+                if (note > 0) pluck(buf, (bar * 8 + s) * stepSec, midiFreq(note), stepSec * 2.4f, 0.5f)
+            }
+            val barStart = bar * 8 * stepSec
+            pluck(buf, barStart, midiFreq(BASS[bar]), stepSec * 4f, 0.55f)
+            pluck(buf, barStart + 4 * stepSec, midiFreq(BASS[bar] + 7), stepSec * 4f, 0.40f)
+        }
+
+        var peak = 0f
+        for (v in buf) peak = max(peak, abs(v))
+        val scale = if (peak > 0f) 0.8f / peak else 1f
+        val data = ShortArray(buf.size) {
+            (buf[it] * scale * 32767f).toInt().coerceIn(-32768, 32767).toShort()
+        }
+
+        val t = AudioTrack.Builder()
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_GAME)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .build()
+            )
+            .setAudioFormat(
+                AudioFormat.Builder()
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .setSampleRate(sampleRate)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                    .build()
+            )
+            .setBufferSizeInBytes(data.size * 2)
+            .setTransferMode(AudioTrack.MODE_STATIC)
+            .build()
+        t.write(data, 0, data.size)
+        t.setLoopPoints(0, data.size, -1)
+        return t
+    }
+
+    private fun midiFreq(note: Int): Float =
+        (440.0 * Math.pow(2.0, (note - 69) / 12.0)).toFloat()
+
+    private fun pluck(buf: FloatArray, startSec: Float, freq: Float, durSec: Float, vol: Float) {
+        val s0 = (startSec * sampleRate).toInt()
+        val n = (durSec * sampleRate).toInt()
+        for (i in 0 until n) {
+            val idx = s0 + i
+            if (idx >= buf.size) break
+            val t = i.toFloat() / sampleRate
+            val attack = min(1f, t / 0.006f)
+            val tail = min(1f, (durSec - t) / 0.03f)
+            val env = attack * tail * exp(-t * 4.2f)
+            val w = sin(2.0 * PI * freq * t) +
+                0.35 * sin(4.0 * PI * freq * t) +
+                0.12 * sin(6.0 * PI * freq * t)
+            buf[idx] += (w / 1.47).toFloat() * vol * env
+        }
+    }
+
+    companion object {
+        const val DEFAULT_VOLUME = 0.30f
+        const val DUCK_VOLUME = 0.06f
+
+        // 한 마디 = 8분음표 8칸 (0은 쉼표). C - Am - F - G - C - Am - G - C 코드 진행.
+        private val MELODY = arrayOf(
+            intArrayOf(64, 67, 72, 67, 64, 67, 72, 0),
+            intArrayOf(69, 72, 76, 72, 69, 72, 64, 0),
+            intArrayOf(65, 69, 72, 69, 65, 69, 72, 0),
+            intArrayOf(67, 71, 74, 71, 67, 71, 74, 0),
+            intArrayOf(76, 72, 76, 79, 76, 72, 67, 0),
+            intArrayOf(69, 72, 76, 72, 74, 72, 69, 0),
+            intArrayOf(71, 74, 71, 67, 62, 67, 71, 0),
+            intArrayOf(72, 0, 67, 0, 64, 0, 60, 0),
+        )
+        private val BASS = intArrayOf(48, 45, 41, 43, 48, 45, 43, 48)
+    }
+}
