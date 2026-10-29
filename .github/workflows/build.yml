@@ -1,0 +1,46 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hangul-tracing-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+
+      # 폰에서 바로 내려받을 수 있도록 "latest" 릴리스에 APK를 올립니다.
+      - name: Publish APK to the "latest" release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp app/build/outputs/apk/debug/app-debug.apk hangul-tracing.apk
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest hangul-tracing.apk \
+            --title "한글 따라쓰기 (최신 APK)" \
+            --notes "자동 빌드된 디버그 APK입니다. 폰에서 내려받아 설치하세요."
