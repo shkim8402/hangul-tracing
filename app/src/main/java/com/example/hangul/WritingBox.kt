@@ -8,6 +8,7 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.view.MotionEvent
 import android.view.View
+import kotlin.math.abs
 
 /**
  * 글자 한 칸. 연한 회색 글자를 손가락으로 따라 쓰면 됩니다.
@@ -16,6 +17,8 @@ import android.view.View
  *  1) 글자 모양의 70% 이상을 덮었고
  *  2) 글자 밖으로 크게 벗어나지 않았고 (칸 전체 낙서 방지)
  *  3) 글자 위에 "획 굵기만큼의 안 덮인 덩어리"가 남아 있지 않을 것 (빼먹은 획 검출)
+ *  4) 글자의 획(뼈대 가지)마다, 손가락이 지나간 칸이 충분히 배정되어 있을 것
+ *     (판정 붓이 넓어서 옆 획에 같이 덮여 버린 "안 쓴 획"을 잡아내는 검사)
  *
  * 판정은 화면에 보이는 획이 아니라, 같은 궤적을 더 굵게(JUDGE_FRACTION) 그려 둔 숨은 층으로 합니다.
  * 그래서 손가락이 글자에서 꽤 벗어나도 봐주면서, 화면의 획은 가늘게 유지할 수 있어요.
@@ -42,6 +45,13 @@ class WritingBox(context: Context, private val syllable: String) : View(context)
     private var gridW = 0
     private var gridH = 0
     private var tolerance = BooleanArray(0)     // 글자 주변 허용 범위
+
+    // 획별 검사용: 손가락이 그은 선분(칸 크기로 나눈 0~1 좌표)과, 격자 칸마다 "가장 가까운 획 번호"
+    private var segs = FloatArray(1024)
+    private var segCount = 0
+    private var ownerMap = IntArray(0)          // 0 = 획 없음, 1.. = 획 번호
+    private var branchSizes = IntArray(1)       // 획 번호별 뼈대 길이(칸 수)
+
     private var baseline = 0f
     private var lastX = 0f
     private var lastY = 0f
@@ -150,6 +160,7 @@ class WritingBox(context: Context, private val syllable: String) : View(context)
             }
         }
         glyphIdx = list.toIntArray()
+        buildBranches()
 
         // 2) 글자를 두껍게 부풀린 "허용 범위"
         tmp.eraseColor(0)
@@ -165,6 +176,7 @@ class WritingBox(context: Context, private val syllable: String) : View(context)
     fun clear() {
         strokeBmp?.eraseColor(0)
         judgeBmp?.eraseColor(0)
+        segCount = 0
         done = false
         invalidate()
     }
@@ -178,6 +190,7 @@ class WritingBox(context: Context, private val syllable: String) : View(context)
                 lastY = e.y
                 c.drawCircle(e.x, e.y, inkPaint.strokeWidth / 2f, dotPaint)
                 judgeCanvas?.drawCircle(e.x, e.y, judgePaint.strokeWidth / 2f, judgeDotPaint)
+                addSeg(e.x, e.y, e.x, e.y)
                 invalidate()
             }
             MotionEvent.ACTION_MOVE -> {
@@ -199,6 +212,7 @@ class WritingBox(context: Context, private val syllable: String) : View(context)
     private fun segment(c: Canvas, x: Float, y: Float) {
         c.drawLine(lastX, lastY, x, y, inkPaint)
         judgeCanvas?.drawLine(lastX, lastY, x, y, judgePaint)
+        addSeg(lastX, lastY, x, y)
         lastX = x
         lastY = y
     }
@@ -236,8 +250,231 @@ class WritingBox(context: Context, private val syllable: String) : View(context)
         // 3) 안 덮인 획 조각이 남아 있으면 아직 미완성
         if (hasUncoveredBlock(px, w)) return
 
+        // 4) 아직 안 쓴 획이 있으면 미완성
+        if (hasMissingStroke(w, h)) return
+
         done = true
         onDone?.invoke()
+    }
+
+    // ------------------------------------------------------------ 획별 검사 (빠진 획 검출)
+
+    private fun addSeg(x0: Float, y0: Float, x1: Float, y1: Float) {
+        if (width <= 0 || height <= 0) return
+        if ((segCount + 1) * 4 > segs.size) segs = segs.copyOf(segs.size * 2)
+        val o = segCount * 4
+        segs[o] = x0 / width
+        segs[o + 1] = y0 / height
+        segs[o + 2] = x1 / width
+        segs[o + 3] = y1 / height
+        segCount++
+    }
+
+    /** 8방향 이웃 중 true인 칸 수 (가장자리 칸은 부르지 않음) */
+    private fun neighbors(a: BooleanArray, i: Int, gw: Int): Int {
+        var n = 0
+        if (a[i - gw - 1]) n++
+        if (a[i - gw]) n++
+        if (a[i - gw + 1]) n++
+        if (a[i - 1]) n++
+        if (a[i + 1]) n++
+        if (a[i + gw - 1]) n++
+        if (a[i + gw]) n++
+        if (a[i + gw + 1]) n++
+        return n
+    }
+
+    /** Zhang-Suen 세선화: 글자 모양을 1칸 두께의 뼈대로 줄입니다. */
+    private fun thin(src: BooleanArray, gw: Int, gh: Int): BooleanArray {
+        val a = src.copyOf()
+        val rm = IntArray(gw * gh)
+        var changed = true
+        while (changed) {
+            changed = false
+            for (step in 0..1) {
+                var rc = 0
+                for (y in 1 until gh - 1) {
+                    for (x in 1 until gw - 1) {
+                        val i = y * gw + x
+                        if (!a[i]) continue
+                        val p2 = a[i - gw]
+                        val p3 = a[i - gw + 1]
+                        val p4 = a[i + 1]
+                        val p5 = a[i + gw + 1]
+                        val p6 = a[i + gw]
+                        val p7 = a[i + gw - 1]
+                        val p8 = a[i - 1]
+                        val p9 = a[i - gw - 1]
+                        var n = 0
+                        if (p2) n++
+                        if (p3) n++
+                        if (p4) n++
+                        if (p5) n++
+                        if (p6) n++
+                        if (p7) n++
+                        if (p8) n++
+                        if (p9) n++
+                        if (n < 2 || n > 6) continue
+                        var t = 0
+                        if (!p2 && p3) t++
+                        if (!p3 && p4) t++
+                        if (!p4 && p5) t++
+                        if (!p5 && p6) t++
+                        if (!p6 && p7) t++
+                        if (!p7 && p8) t++
+                        if (!p8 && p9) t++
+                        if (!p9 && p2) t++
+                        if (t != 1) continue
+                        if (step == 0) {
+                            if (p2 && p4 && p6) continue
+                            if (p4 && p6 && p8) continue
+                        } else {
+                            if (p2 && p4 && p8) continue
+                            if (p2 && p6 && p8) continue
+                        }
+                        rm[rc++] = i
+                    }
+                }
+                if (rc > 0) {
+                    changed = true
+                    for (k in 0 until rc) a[rm[k]] = false
+                }
+            }
+        }
+        return a
+    }
+
+    /**
+     * 글자 뼈대를 갈림길에서 끊어 "획(가지)"들로 나누고,
+     * 격자의 모든 칸에 "가장 가까운 획 번호"를 붙여 둡니다.
+     */
+    private fun buildBranches() {
+        val gw = gridW
+        val gh = gridH
+        ownerMap = IntArray(0)
+        branchSizes = IntArray(1)
+        if (gw < 5 || gh < 5) return
+
+        val skel = thin(glyphGrid, gw, gh)
+
+        // 갈림길(이웃 3개 이상)과 그 주변 칸을 지워서 가지들로 분리
+        val rest = skel.copyOf()
+        for (y in 1 until gh - 1) {
+            for (x in 1 until gw - 1) {
+                val i = y * gw + x
+                if (skel[i] && neighbors(skel, i, gw) >= 3) {
+                    for (dy in -1..1) for (dx in -1..1) rest[i + dy * gw + dx] = false
+                }
+            }
+        }
+
+        // 연결된 덩어리마다 번호 붙이기 (너무 짧은 가지는 무시)
+        val label = IntArray(gw * gh)
+        val cells = IntArray(gw * gh)
+        val minCells = maxOf(4, Math.round(width * MIN_BRANCH_FRACTION / 3f))
+        val sizes = ArrayList<Int>()
+        sizes.add(0)
+        var next = 1
+        for (start in rest.indices) {
+            if (!rest[start] || label[start] != 0) continue
+            var n = 0
+            cells[n++] = start
+            label[start] = next
+            var head = 0
+            while (head < n) {
+                val c = cells[head++]
+                val cx = c % gw
+                val cy = c / gw
+                for (dy in -1..1) {
+                    for (dx in -1..1) {
+                        if (dx == 0 && dy == 0) continue
+                        val nx = cx + dx
+                        val ny = cy + dy
+                        if (nx < 0 || ny < 0 || nx >= gw || ny >= gh) continue
+                        val ni = ny * gw + nx
+                        if (rest[ni] && label[ni] == 0) {
+                            label[ni] = next
+                            cells[n++] = ni
+                        }
+                    }
+                }
+            }
+            if (n >= minCells) {
+                sizes.add(n)
+                next++
+            } else {
+                for (k in 0 until n) label[cells[k]] = -1
+            }
+        }
+        if (next == 1) return
+
+        // 모든 칸에 가장 가까운 획 번호 붙이기 (여러 곳에서 동시에 퍼지는 BFS)
+        val owner = IntArray(gw * gh)
+        val queue = IntArray(gw * gh)
+        var qh = 0
+        var qt = 0
+        for (i in label.indices) {
+            if (label[i] > 0) {
+                owner[i] = label[i]
+                queue[qt++] = i
+            }
+        }
+        while (qh < qt) {
+            val c = queue[qh++]
+            val cx = c % gw
+            val cy = c / gw
+            for (dy in -1..1) {
+                for (dx in -1..1) {
+                    if (dx == 0 && dy == 0) continue
+                    val nx = cx + dx
+                    val ny = cy + dy
+                    if (nx < 0 || ny < 0 || nx >= gw || ny >= gh) continue
+                    val ni = ny * gw + nx
+                    if (owner[ni] == 0) {
+                        owner[ni] = owner[c]
+                        queue[qt++] = ni
+                    }
+                }
+            }
+        }
+        ownerMap = owner
+        branchSizes = sizes.toIntArray()
+    }
+
+    /**
+     * 손가락이 지나간 칸들을 "가장 가까운 획"에 배정해서,
+     * 획 하나라도 길이의 일정 비율(OWN_NEEDED)만큼 지나가지 않았다면 true (= 빠진 획이 있음)
+     */
+    private fun hasMissingStroke(w: Int, h: Int): Boolean {
+        if (ownerMap.size != gridW * gridH || branchSizes.size <= 1) return false
+
+        val path = BooleanArray(gridW * gridH)
+        for (s in 0 until segCount) {
+            val o = s * 4
+            val x0 = segs[o] * w
+            val y0 = segs[o + 1] * h
+            val x1 = segs[o + 2] * w
+            val y1 = segs[o + 3] * h
+            val steps = maxOf(1, (maxOf(abs(x1 - x0), abs(y1 - y0)) / 1.5f).toInt())
+            for (k in 0..steps) {
+                val t = k.toFloat() / steps
+                val gx = ((x0 + (x1 - x0) * t) / 3f).toInt().coerceIn(0, gridW - 1)
+                val gy = ((y0 + (y1 - y0) * t) / 3f).toInt().coerceIn(0, gridH - 1)
+                path[gy * gridW + gx] = true
+            }
+        }
+
+        val cnt = IntArray(branchSizes.size)
+        for (i in path.indices) {
+            if (path[i]) {
+                val o = ownerMap[i]
+                if (o > 0) cnt[o]++
+            }
+        }
+        for (k in 1 until branchSizes.size) {
+            if (cnt[k] < OWN_NEEDED * branchSizes[k]) return true
+        }
+        return false
     }
 
     /** 글자 위에서 정사각형 블록 하나가 통째로 안 덮여 있는 곳이 있는지 (적분 이미지로 검사) */
@@ -324,6 +561,12 @@ class WritingBox(context: Context, private val syllable: String) : View(context)
 
         /** 글자 밖으로 벗어난 획의 허용 비율 (칸 전체 낙서를 걸러내는 기준) */
         const val MAX_OUTSIDE = 0.15f
+
+        /** 획별 검사: 이 비율보다 짧은 뼈대 가지는 획으로 안 침 (칸 너비 대비) */
+        const val MIN_BRANCH_FRACTION = 0.045f
+
+        /** 획별 검사: 획마다 손가락이 지나간 칸이 뼈대 길이의 이 비율 이상 배정되어야 함 */
+        const val OWN_NEEDED = 0.40f
 
         /** 안 덮인 블록 검사 크기 (칸 너비 대비). 획 굵기(약 0.06)보다 조금 작은 값 */
         const val BLOCK_FRACTION = 0.053f
