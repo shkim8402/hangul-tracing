@@ -13,9 +13,12 @@ import android.view.View
  * 글자 한 칸. 연한 회색 글자를 손가락으로 따라 쓰면 됩니다.
  *
  * 완료 조건 (모두 만족해야 함, 마지막 획까지 다 써야 통과):
- *  1) 글자 모양의 85% 이상을 덮었고
+ *  1) 글자 모양의 70% 이상을 덮었고
  *  2) 글자 밖으로 크게 벗어나지 않았고 (칸 전체 낙서 방지)
  *  3) 글자 위에 "획 굵기만큼의 안 덮인 덩어리"가 남아 있지 않을 것 (빼먹은 획 검출)
+ *
+ * 판정은 화면에 보이는 획이 아니라, 같은 궤적을 더 굵게(JUDGE_FRACTION) 그려 둔 숨은 층으로 합니다.
+ * 그래서 손가락이 글자에서 꽤 벗어나도 봐주면서, 화면의 획은 가늘게 유지할 수 있어요.
  */
 class WritingBox(context: Context, private val syllable: String) : View(context) {
 
@@ -152,7 +155,7 @@ class WritingBox(context: Context, private val syllable: String) : View(context)
         tmp.eraseColor(0)
         p.style = Paint.Style.FILL_AND_STROKE
         p.strokeJoin = Paint.Join.ROUND
-        p.strokeWidth = w * 0.22f
+        p.strokeWidth = w * TOLERANCE_FRACTION
         c.drawText(syllable, w / 2f, baseline, p)
         tmp.getPixels(px, 0, w, 0, 0, w, h)
         tolerance = BooleanArray(w * h) { (px[it] ushr 24) > 10 }
@@ -311,13 +314,16 @@ class WritingBox(context: Context, private val syllable: String) : View(context)
         const val INK_FRACTION = 0.05f
 
         /** 판정에 쓰는 획 굵기 (칸 너비 대비). 시뮬레이션으로 맞춘 값이라 보이는 굵기와 상관없이 고정 */
-        const val JUDGE_FRACTION = 0.12f
+        const val JUDGE_FRACTION = 0.24f
 
-        /** 글자 모양의 몇 %를 덮어야 완료인지 */
-        const val COVERAGE_NEEDED = 0.85f
+        /** 허용 범위(글자 주변 여유) 굵기 (칸 너비 대비). 손가락이 글자 밖으로 조금 벗어나도 봐주는 폭 */
+        const val TOLERANCE_FRACTION = 0.34f
+
+        /** 글자 모양의 몇 %를 덮어야 완료인지 (빼먹은 획은 아래 블록 검사가 따로 잡습니다) */
+        const val COVERAGE_NEEDED = 0.70f
 
         /** 글자 밖으로 벗어난 획의 허용 비율 (칸 전체 낙서를 걸러내는 기준) */
-        const val MAX_OUTSIDE = 0.18f
+        const val MAX_OUTSIDE = 0.15f
 
         /** 안 덮인 블록 검사 크기 (칸 너비 대비). 획 굵기(약 0.06)보다 조금 작은 값 */
         const val BLOCK_FRACTION = 0.053f
